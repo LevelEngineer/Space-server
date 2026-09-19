@@ -8,7 +8,7 @@ wss.on('connection', (ws)=>{
     try{
       const msg=JSON.parse(data);
       if(msg.type==='createRoom'){
-        let code=genCode(); rooms[code]={players:[]};
+        let code=genCode(); rooms[code]={players:[], score:0};
         ws.room=code; rooms[code].players.push(ws);
         ws.send(JSON.stringify({type:'joined', code, isHost:true, id:ws.id}));
       }
@@ -17,7 +17,7 @@ wss.on('connection', (ws)=>{
         if(!rooms[code]||rooms[code].players.length>=4) return ws.send(JSON.stringify({type:'error', msg:'Sala llena o no existe'}));
         ws.room=code; rooms[code].players.push(ws);
         rooms[code].players.forEach(p=>{ if(p.readyState===1) p.send(JSON.stringify({type:'playerJoined', id:ws.id, count:rooms[code].players.length})); });
-        ws.send(JSON.stringify({type:'joined', code, isHost:false, id:ws.id}));
+        ws.send(JSON.stringify({type:'joined', code, isHost:false, id:ws.id, score:rooms[code].score}));
       }
       if(msg.type==='move'){
         if(!ws.room||!rooms[ws.room]) return;
@@ -27,14 +27,19 @@ wss.on('connection', (ws)=>{
         if(!ws.room||!rooms[ws.room]) return;
         rooms[ws.room].players.forEach(p=>{ if(p!==ws&&p.readyState===1) p.send(JSON.stringify({type:'enemyShoot', id:ws.id, x:msg.x, y:msg.y, a:msg.a})); });
       }
+      if(msg.type==='addScore'){
+        if(!ws.room||!rooms[ws.room]) return;
+        rooms[ws.room].score += msg.amount;
+        rooms[ws.room].players.forEach(p=>{ if(p.readyState===1) p.send(JSON.stringify({type:'scoreUpdate', score:rooms[ws.room].score})); });
+      }
     }catch(e){console.log(e);}
   });
   ws.on('close', ()=>{
     if(ws.room&&rooms[ws.room]){
       rooms[ws.room].players=rooms[ws.room].players.filter(p=>p!==ws);
-      rooms[ws.room].players.forEach(p=>{ if(p.readyState===1) p.send(JSON.stringify({type:'playerLeft', id:ws.id})); });
+      rooms[ws.room].players.forEach(p=>{ if(p.readyState===1) p.send(JSON.stringify({type:'playerLeft', id:ws.id, count:rooms[ws.room].players.length})); });
       if(rooms[ws.room].players.length===0) delete rooms[ws.room];
     }
   });
 });
-console.log("Servidor corriendo");
+console.log("Servidor corriendo con score compartido");

@@ -1,45 +1,97 @@
 const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: process.env.PORT || 3000 });
-const rooms = {};
-function genCode(){return Math.random().toString(36).substring(2,6).toUpperCase();}
-wss.on('connection', (ws)=>{
-  ws.room=null; ws.id=Math.random().toString(36).slice(2,9);
-  ws.on('message', (data)=>{
+const wss = new WebSocket.Server({ port: process.env.PORT || 10000 });
+
+let rooms = {}; // code -> { hostId, players: Map<id, ws>, score: 0 }
+
+function makeCode(){
+  return Math.random().toString(36).substring(2,6).toUpperCase();
+}
+
+function broadcast(roomCode, data, exceptId=null){
+  let room = rooms[roomCode];
+  if(!room) return;
+  let str = JSON.stringify(data);
+  for(let [id, client] of room.players){
+    if(id!==exceptId && client.readyState===1) client.send(str);
+  }
+}
+
+wss.on('connection', ws=>{
+  let myId = Math.random().toString(36).substring(2,9);
+  let myRoom = null;
+  let isHost = false;
+  ws.id = myId;
+
+  ws.on('message', raw=>{
     try{
-      const msg=JSON.parse(data);
+      let msg = JSON.parse(raw);
+
       if(msg.type==='createRoom'){
-        let code=genCode(); rooms[code]={players:[], score:0};
-        ws.room=code; rooms[code].players.push(ws);
-        ws.send(JSON.stringify({type:'joined', code, isHost:true, id:ws.id}));
+        let code = makeCode();
+        rooms[code] = { hostId: myId, players: new Map(), score: 0 };
+        rooms[code].players.set(myId, ws);
+        myRoom = code; isHost = true;
+        ws.send(JSON.stringify({ type:'joined', code, id:myId, isHost:true, score:0 }));
+        console.log('Room created', code);
       }
+
       if(msg.type==='joinRoom'){
-        let code=msg.code.toUpperCase();
-        if(!rooms[code]||rooms[code].players.length>=4) return ws.send(JSON.stringify({type:'error', msg:'Sala llena o no existe'}));
-        ws.room=code; rooms[code].players.push(ws);
-        rooms[code].players.forEach(p=>{ if(p.readyState===1) p.send(JSON.stringify({type:'playerJoined', id:ws.id, count:rooms[code].players.length})); });
-        ws.send(JSON.stringify({type:'joined', code, isHost:false, id:ws.id, score:rooms[code].score}));
+        let code = msg.code.toUpperCase();
+        let room = rooms[code];
+        if(!room) return ws.send(JSON.stringify({type:'error', msg:'Sala no existe'}));
+        room.players.set(myId, ws);
+        myRoom = code; isHost = false;
+        ws.send(JSON.stringify({ type:'joined', code, id:myId, isHost:false, score:room.score }));
+        broadcast(code, { type:'playerJoined', count: room.players.size });
       }
+
       if(msg.type==='move'){
-        if(!ws.room||!rooms[ws.room]) return;
-        rooms[ws.room].players.forEach(p=>{ if(p!==ws&&p.readyState===1) p.send(JSON.stringify({type:'update', id:ws.id, x:msg.x, y:msg.y, a:msg.a})); });
+        if(!myRoom) return;
+        broadcast(myRoom, { type:'update', id:myId, x:msg.x, y:msg.y, a:msg.a, life:msg.life }, myId);
       }
-      if(msg.type==='shoot'){
-        if(!ws.room||!rooms[ws.room]) return;
-        rooms[ws.room].players.forEach(p=>{ if(p!==ws&&p.readyState===1) p.send(JSON.stringify({type:'enemyShoot', id:ws.id, x:msg.x, y:msg.y, a:msg.a})); });
-      }
+
       if(msg.type==='addScore'){
-        if(!ws.room||!rooms[ws.room]) return;
-        rooms[ws.room].score += msg.amount;
-        rooms[ws.room].players.forEach(p=>{ if(p.readyState===1) p.send(JSON.stringify({type:'scoreUpdate', score:rooms[ws.room].score})); });
+        if(!myRoom) return;
+        let room = rooms[myRoom];
+        if(!room) return;
+        room.score += msg.amount;
+        broadcast(myRoom, { type:'scoreUpdate', score: room.score });
       }
-    }catch(e){console.log(e);}
+
+      if(msg.type==='shoot'){
+        if(!myRoom) return;
+        broadcast(myRoom, { type:'enemyShoot', x:msg.x, y:msg.y, a:msg.a }, myId);
+      }
+
+      // HOST AUTORITARIO - solo el host puede mandar el mundo
+      if(msg.type==='syncWorld'){
+        if(!myRoom) return;
+        let room = rooms[myRoom];
+        if(!room) return;
+        if(room.hostId!==myId) return; // anti trampa
+        broadcast(myRoom, msg, myId);
+      }
+
+    }catch(e){ console.log(e); }
   });
+
   ws.on('close', ()=>{
-    if(ws.room&&rooms[ws.room]){
-      rooms[ws.room].players=rooms[ws.room].players.filter(p=>p!==ws);
-      rooms[ws.room].players.forEach(p=>{ if(p.readyState===1) p.send(JSON.stringify({type:'playerLeft', id:ws.id, count:rooms[ws.room].players.length})); });
-      if(rooms[ws.room].players.length===0) delete rooms[ws.room];
+    if(myRoom && rooms[myRoom]){
+      rooms[myRoom].players.delete(myId);
+      if(rooms[myRoom].players.size===0){
+        delete rooms[myRoom];
+      } else {
+        // si se fue el host, asignar nuevo host
+        if(rooms[myRoom].hostId===myId){
+          let newHostId = rooms[myRoom].players.keys().next().value;
+          rooms[myRoom].hostId = newHostId;
+          let newHostWs = rooms[myRoom].players.get(newHostId);
+          if(newHostWs) newHostWs.send(JSON.stringify({type:'nowHost'}));
+        }
+        broadcast(myRoom, { type:'playerLeft', id:myId, count: rooms[myRoom].players.size });
+      }
     }
   });
 });
-console.log("Servidor corriendo con score compartido");
+
+console.log('Server running');
